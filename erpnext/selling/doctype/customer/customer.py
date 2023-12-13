@@ -541,6 +541,7 @@ def check_credit_limit(customer, company, ignore_outstanding_sales_order=False, 
 				primary_action={
 					"label": "Send Email",
 					"server_action": "erpnext.selling.doctype.customer.customer.send_emails",
+					"hide_on_success": True,
 					"args": {
 						"customer": customer,
 						"customer_outstanding": customer_outstanding,
@@ -581,7 +582,8 @@ def get_customer_outstanding(
 		"""
 		select sum(debit) - sum(credit)
 		from `tabGL Entry` where party_type = 'Customer'
-		and party = %s and company=%s {0}""".format(
+		and is_cancelled = 0 and party = %s
+		and company=%s {0}""".format(
 			cond
 		),
 		(customer, company),

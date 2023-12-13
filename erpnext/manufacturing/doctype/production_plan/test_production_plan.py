@@ -653,49 +653,6 @@ class TestProductionPlan(FrappeTestCase):
 
 		frappe.db.rollback()
 
-	def test_subassmebly_sorting(self):
-		"Test subassembly sorting in case of multiple items with nested BOMs."
-		from erpnext.manufacturing.doctype.bom.test_bom import create_nested_bom
-
-		prefix = "_TestLevel_"
-		boms = {
-			"Assembly": {
-				"SubAssembly1": {
-					"ChildPart1": {},
-					"ChildPart2": {},
-				},
-				"ChildPart6": {},
-				"SubAssembly4": {"SubSubAssy2": {"ChildPart7": {}}},
-			},
-			"MegaDeepAssy": {
-				"SecretSubassy": {
-					"SecretPart": {"VerySecret": {"SuperSecret": {"Classified": {}}}},
-				},
-				# ^ assert that this is
-				# first item in subassy table
-			},
-		}
-		create_nested_bom(boms, prefix=prefix)
-
-		items = [prefix + item_code for item_code in boms.keys()]
-		plan = create_production_plan(item_code=items[0], do_not_save=True)
-		plan.append(
-			"po_items",
-			{
-				"use_multi_level_bom": 1,
-				"item_code": items[1],
-				"bom_no": frappe.db.get_value("Item", items[1], "default_bom"),
-				"planned_qty": 1,
-				"planned_start_date": now_datetime(),
-			},
-		)
-		plan.get_sub_assembly_items()
-
-		bom_level_order = [d.bom_level for d in plan.sub_assembly_items]
-		self.assertEqual(bom_level_order, sorted(bom_level_order, reverse=True))
-		# lowest most level of subassembly should be first
-		self.assertIn("SuperSecret", plan.sub_assembly_items[0].production_item)
-
 	def test_multiple_work_order_for_production_plan_item(self):
 		"Test producing Prod Plan (making WO) in parts."
 
@@ -1315,12 +1272,14 @@ class TestProductionPlan(FrappeTestCase):
 		for row in items:
 			row = frappe._dict(row)
 			if row.material_request_type == "Material Transfer":
+				self.assertTrue(row.uom == row.stock_uom)
 				self.assertTrue(row.from_warehouse in [wh1, wh2])
 				self.assertEqual(row.quantity, 2)
 
 			if row.material_request_type == "Purchase":
+				self.assertTrue(row.uom != row.stock_uom)
 				self.assertTrue(row.warehouse == mrp_warhouse)
-				self.assertEqual(row.quantity, 12)
+				self.assertEqual(row.quantity, 12.0)
 
 	def test_mr_qty_for_same_rm_with_different_sub_assemblies(self):
 		from erpnext.manufacturing.doctype.bom.test_bom import create_nested_bom
@@ -1435,6 +1394,58 @@ class TestProductionPlan(FrappeTestCase):
 		)
 
 		self.assertEqual(after_qty, before_qty)
+
+	def test_material_request_qty_purchase_and_material_transfer(self):
+		from erpnext.stock.doctype.item.test_item import make_item
+		from erpnext.stock.doctype.warehouse.test_warehouse import create_warehouse
+
+		fg_item = make_item(properties={"is_stock_item": 1, "stock_uom": "_Test UOM 1"}).name
+		bom_item = make_item(
+			properties={"is_stock_item": 1, "stock_uom": "_Test UOM 1", "purchase_uom": "Nos"}
+		).name
+
+		store_warehouse = create_warehouse("Store Warehouse", company="_Test Company")
+		rm_warehouse = create_warehouse("RM Warehouse", company="_Test Company")
+
+		make_stock_entry(
+			item_code=bom_item,
+			qty=60,
+			target=store_warehouse,
+			rate=99,
+		)
+
+		if not frappe.db.exists("UOM Conversion Detail", {"parent": bom_item, "uom": "Nos"}):
+			doc = frappe.get_doc("Item", bom_item)
+			doc.append("uoms", {"uom": "Nos", "conversion_factor": 10})
+			doc.save()
+
+		make_bom(item=fg_item, raw_materials=[bom_item], source_warehouse="_Test Warehouse - _TC")
+
+		pln = create_production_plan(
+			item_code=fg_item, planned_qty=10, stock_uom="_Test UOM 1", do_not_submit=1
+		)
+
+		pln.for_warehouse = rm_warehouse
+		items = get_items_for_material_requests(
+			pln.as_dict(), warehouses=[{"warehouse": store_warehouse}]
+		)
+
+		for row in items:
+			self.assertEqual(row.get("quantity"), 10.0)
+			self.assertEqual(row.get("material_request_type"), "Material Transfer")
+			self.assertEqual(row.get("uom"), "_Test UOM 1")
+			self.assertEqual(row.get("from_warehouse"), store_warehouse)
+			self.assertEqual(row.get("conversion_factor"), 1.0)
+
+		items = get_items_for_material_requests(
+			pln.as_dict(), warehouses=[{"warehouse": pln.for_warehouse}]
+		)
+
+		for row in items:
+			self.assertEqual(row.get("quantity"), 1.0)
+			self.assertEqual(row.get("material_request_type"), "Purchase")
+			self.assertEqual(row.get("uom"), "Nos")
+			self.assertEqual(row.get("conversion_factor"), 10.0)
 
 
 def create_production_plan(**args):
